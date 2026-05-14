@@ -35,7 +35,8 @@ chain = prompt | llm
 scenarios = [
     "Revenue down 5%, NPL ratio 2.1%, CAR 14.2%",
     "Revenue up 20%, NPL ratio 5.8%, CAR 9.1%",
-    "Revenue flat, NPL ratio 1.8%, CAR 16.5%"
+    "Revenue flat, NPL ratio 1.8%, CAR 16.5%",
+    "what was the revenue I mentioned before?"
 ]
 
 for scenario in scenarios:
