@@ -1,6 +1,7 @@
 import json
 import os
 
+from fastapi import FastAPI
 from langchain_anthropic import ChatAnthropic
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_community.document_loaders import PyPDFLoader
@@ -10,7 +11,10 @@ from langgraph.graph import END, StateGraph
 from langgraph.types import interrupt
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.types import Command
-from typing import TypedDict
+from typing import Optional, TypedDict
+from fastapi.exceptions import HTTPException
+
+from pydantic import BaseModel
 
 
 os.environ["ANTHROPIC_API_KEY"] = os.environ.get("CLAUDEKEY")
@@ -364,14 +368,7 @@ workflow.add_conditional_edges(
         "rejected_handler": "rejected_handler"
     }
 )
-# workflow.add_conditional_edges(
-#     "deep_risk_analysis",
-#     route_after_analysis,
-#     {
-#         "generate_report": "generate_report",
-#         END: END
-#     }
-# )
+
 workflow.add_conditional_edges(
     "standard_analysis",
     route_after_analysis,
@@ -397,76 +394,106 @@ app = workflow.compile(checkpointer=memory)
 
 
 
-# Banking app invoke statements
 
-print("Banking analysis workflow is ready to execute. Call app with initial state containing the question.")
 
-print("=" * 60)
+fapp = FastAPI(title="Intelligent Banking Analyst API")
 
-question = input("Enter the question you want to ask about the bank's performance: ")
+class AnalysisRequestModel(BaseModel):
+    question: str
+    thread_id: str
 
-print("Running workflow")
+class WorkFlowResponseModel(BaseModel):
+    thread_id: str
+    status: str
+    risk_level: str
+    current_step: str
+    final_report: Optional[str] = None
+    pending_review: Optional[str] = None
 
-# Run the workflow with the initial state containing the question
+class HumanReviewModel(BaseModel):
+    thread_id: str
+    decision: str
+    comments: Optional[str] = None
 
-config = {"configurable": {"thread_id": "banking_analysis_1"}}
 
-result = app.invoke({
-    "question": question,
-    "raw_context": "",
-    "key_metrics": "",
-    "performance_analysis": "",
-    "risk_analysis": "",
-    "final_report": "",
-    "current_step": "started",
-    "risk_level": "Medium",
-    "data_sufficient": True,
-    "human_comments": "",
-    "human_decision": ""
-},config)
+@fapp.get("/")
+def root():
+    return {"status": "This is an intelligent banking analyst interface"}
 
-# Check if workflow was interrupted 
-while True:
-    # Get the current state of the workflow
+@fapp.post("/ask", response_model=WorkFlowResponseModel)
+def ask_question(request: AnalysisRequestModel):
+
+    config = {"configurable": {"thread_id": request.thread_id}}
+
+    result = app.invoke({
+        "question": request.question,
+        "raw_context": "",
+        "key_metrics": "",
+        "performance_analysis": "",
+        "risk_analysis": "",
+        "final_report": "",
+        "current_step": "started",
+        "risk_level": "Medium",
+        "data_sufficient": True,
+        "human_comments": "",
+        "human_decision": ""
+    }, config)
 
     current_state = app.get_state(config)
 
-    if not current_state.next:
-        # No more steps
-        break
-
-    if current_state.next[0] == '__end__':
-        break
-
-    # check if ther are interrupts 
-    interrupts = current_state.tasks
-    if interrupts:
-        print("=" * 60)
-        print("Workflow interrupted. Review the risks")
-
+    if current_state.next and current_state.next[0] != '__end__':
+        status = "pending_review"
+        pending_review = "High risk detected, awaiting human review"
         state_values = current_state.values
-
-        print(f"Risk level: {state_values["risk_level"]}")
-        print(f"Risk Analysis:\n {state_values['risk_analysis']}")
-
-        decision = input("Approve or Reject the analysis ").strip()
-        comments = input("Add comments(Optional press enter to skip) ").strip()
-
-        # Resume workflow with human comments
-        result = app.invoke(
-            Command(resume={
-                "decision": decision,
-                "comments": comments
-            }),
-            config
+        return WorkFlowResponseModel(
+            thread_id=request.thread_id,
+            status=status,
+            risk_level=state_values["risk_level"],
+            current_step=state_values["current_step"],
+            pending_review=pending_review
         )
-        break
+    
+    state_values = current_state.values
+    return WorkFlowResponseModel(
+        thread_id=request.thread_id,
+        status="completed",
+        risk_level=state_values["risk_level"],
+        current_step=state_values["current_step"],
+        final_report=state_values["final_report"]
+    )
 
-final_state = app.get_state(config).values
+@fapp.post("/human_review", response_model=WorkFlowResponseModel)
+def submit_human_review(request: HumanReviewModel):
+    config = {"configurable": {"thread_id": request.thread_id}}
+    result = app.invoke(
+        Command(resume={
+            "decision": request.decision,
+            "comments": request.comments
+        }),
+        config
+    )
+    current_state = app.get_state(config)
+    state_values = current_state.values
+    return WorkFlowResponseModel(
+        thread_id=request.thread_id,
+        status="Rejected" if request.decision.lower() == "reject" else "Completed",
+        risk_level=state_values["risk_level"],
+        current_step=state_values["current_step"],
+        final_report=state_values["final_report"]
+    )
 
 
-print(f"\nPath taken: {final_state['current_step']}")
-print(f"Risk level detected: {final_state['risk_level']}")
-print(f"Human decision: {final_state['human_decision']}")
-print(f"\nFinal Report:\n{final_state['final_report']}")
-print("=" * 60)
+@fapp.get("/status/{thread_id}")
+def get_status(thread_id: str):
+    config = {"configurable": {"thread_id": thread_id}}
+    current_state = app.get_state(config)
+    try:
+        state_values = current_state.values
+        return {
+            "thread_id": thread_id,
+            "current_step": state_values["current_step"],
+            "risk_level": state_values["risk_level"],
+            "next": list(current_state.next) if current_state.next else []
+        }
+    except Exception as e:
+        raise HTTPException(status_code=404, detail="Thread ID not found or workflow already completed")
