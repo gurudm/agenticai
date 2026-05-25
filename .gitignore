@@ -1,0 +1,12 @@
+.env
+__pycache__/
+*.pyc
+.DS_Store
+venv/
+.venv/
+quaterly_db/
+banking_db/
+pdf_banking_db/
+*.pdf
+secret*
+test_*
