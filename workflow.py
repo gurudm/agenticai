@@ -7,6 +7,9 @@ from langchain_community.document_loaders import PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_chroma import Chroma
 from langgraph.graph import END, StateGraph
+from langgraph.types import interrupt
+from langgraph.checkpoint.memory import MemorySaver
+from langgraph.types import Command
 from typing import TypedDict
 
 
@@ -44,6 +47,8 @@ class AnalysisState(TypedDict):
     current_step: str               # current step in the analysis workflow
     risk_level: str                 # overall risk level (High/Medium/Low)
     data_sufficient: bool           # assessment of whether the data is sufficient to answer the question (Sufficient/Insufficient)
+    human_decision: str             # decision from human review (Approved/Rejected) if applicable
+    human_comments: str             # any comments or notes from the human reviewer (if applicable)
 
 # ------ WORKFLOW NODES ------
 # Each node is a plain function that takes the current state as input and retures an updated state.
@@ -270,6 +275,56 @@ def generate_report(state: AnalysisState) -> AnalysisState:
         "current_step": "report_generated"
     }
 
+from langgraph.types import interrupt
+
+def human_review(state: AnalysisState) -> AnalysisState:
+    """Pause workflow and wait for human approval on high risk findings"""
+    print("\n" + "=" * 60)
+    print("⚠️  HIGH RISK DETECTED - HUMAN REVIEW REQUIRED")
+    print("=" * 60)
+    
+    # This interrupt pauses the entire workflow
+    # It won't continue until resumed with a human decision
+    decision = interrupt({
+        "message": "High risk analysis complete. Human approval required.",
+        "risk_level": state["risk_level"],
+        "risk_summary": state["risk_analysis"][:500]
+    })
+    
+    return {
+        **state,
+        "human_decision": decision.get("decision", "approve"),
+        "human_comments": decision.get("comments", ""),
+        "current_step": "human_reviewed"
+    }
+
+
+def route_after_human_review(state: AnalysisState) -> AnalysisState:
+    """Route based on human decision after review"""
+    if state.get("human_decision") == "reject":
+        print("Human rejected the findings - ending workflow.")
+        return "rejected_handler"
+    print("Human approved the findings - proceeding to report generation.")
+    return "generate_report"
+
+def rejected_handler(state: AnalysisState) -> AnalysisState:
+    """Handle human rejection"""
+
+    return {
+        **state,
+        "final_report": f"""
+        ANALYSIS REJECTED BY HUMAN
+
+        Risk level: {{state['risk_level']}}
+        human comments: {{state['human_comments']}}
+
+        ACTION REQUIRED: Manuanl investigation required before proceeding.
+        Please escalate to senior management
+        """,
+        "current_step": "Rejected"
+    }
+
+
 
 # Build the conditional GRAPH
 workflow = StateGraph(AnalysisState)
@@ -282,6 +337,8 @@ workflow.add_node("deep_risk_analysis", deep_risk_analysis)
 workflow.add_node("standard_analysis", standard_analysis)
 workflow.add_node("insufficient_data_handler", insufficient_data_handler)
 workflow.add_node("generate_report", generate_report)
+workflow.add_node('human_review', human_review)
+workflow.add_node('rejected_handler', rejected_handler)
 
 # Add edges to define the flow of the workflow
 # Linear edges
@@ -298,14 +355,23 @@ workflow.add_conditional_edges(
         "insufficient_data_handler": "insufficient_data_handler"
     }
 )
+workflow.add_edge("deep_risk_analysis", "human_review")
 workflow.add_conditional_edges(
-    "deep_risk_analysis",
-    route_after_analysis,
+    "human_review",
+    route_after_human_review,
     {
         "generate_report": "generate_report",
-        END: END
+        "rejected_handler": "rejected_handler"
     }
 )
+# workflow.add_conditional_edges(
+#     "deep_risk_analysis",
+#     route_after_analysis,
+#     {
+#         "generate_report": "generate_report",
+#         END: END
+#     }
+# )
 workflow.add_conditional_edges(
     "standard_analysis",
     route_after_analysis,
@@ -323,9 +389,15 @@ workflow.add_conditional_edges(
     }
 )
 workflow.add_edge("generate_report", END)
+workflow.add_edge("rejected_handler", END)
 
-# Compile the graph to create an executable workflow
-app = workflow.compile()
+# Compile the graph to create an executable workflow, use MemorySaver requried for interrupt
+memory = MemorySaver()
+app = workflow.compile(checkpointer=memory)
+
+
+
+# Banking app invoke statements
 
 print("Banking analysis workflow is ready to execute. Call app with initial state containing the question.")
 
@@ -333,9 +405,13 @@ print("=" * 60)
 
 question = input("Enter the question you want to ask about the bank's performance: ")
 
+print("Running workflow")
+
 # Run the workflow with the initial state containing the question
 
-final_state = app.invoke({
+config = {"configurable": {"thread_id": "banking_analysis_1"}}
+
+result = app.invoke({
     "question": question,
     "raw_context": "",
     "key_metrics": "",
@@ -344,11 +420,53 @@ final_state = app.invoke({
     "final_report": "",
     "current_step": "started",
     "risk_level": "Medium",
-    "data_sufficient": True
-})
+    "data_sufficient": True,
+    "human_comments": "",
+    "human_decision": ""
+},config)
+
+# Check if workflow was interrupted 
+while True:
+    # Get the current state of the workflow
+
+    current_state = app.get_state(config)
+
+    if not current_state.next:
+        # No more steps
+        break
+
+    if current_state.next[0] == '__end__':
+        break
+
+    # check if ther are interrupts 
+    interrupts = current_state.tasks
+    if interrupts:
+        print("=" * 60)
+        print("Workflow interrupted. Review the risks")
+
+        state_values = current_state.values
+
+        print(f"Risk level: {state_values["risk_level"]}")
+        print(f"Risk Analysis:\n {state_values['risk_analysis']}")
+
+        decision = input("Approve or Reject the analysis ").strip()
+        comments = input("Add comments(Optional press enter to skip) ").strip()
+
+        # Resume workflow with human comments
+        result = app.invoke(
+            Command(resume={
+                "decision": decision,
+                "comments": comments
+            }),
+            config
+        )
+        break
+
+final_state = app.get_state(config).values
 
 
 print(f"\nPath taken: {final_state['current_step']}")
 print(f"Risk level detected: {final_state['risk_level']}")
+print(f"Human decision: {final_state['human_decision']}")
 print(f"\nFinal Report:\n{final_state['final_report']}")
 print("=" * 60)
