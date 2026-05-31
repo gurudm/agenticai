@@ -1,0 +1,15 @@
+fastapi
+uvicorn
+langchain-anthropic
+langchain-huggingface
+langchain-community
+langchain-text-splitters
+langchain-chroma
+langgraph
+langgraph-checkpoint-mongodb
+pymongo
+pypdf
+sentence-transformers
+chromadb
+motor
+python-dotenv

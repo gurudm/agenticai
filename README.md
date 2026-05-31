@@ -110,6 +110,23 @@ curl -X POST http://localhost:8000/review/session_1 \
   -d '{"thread_id": "session_1", "decision": "approve", "comments": "Risk acceptable"}'
 ```
 
+## Running with Docker
+
+```bash
+# Copy env file
+cp .env.example .env
+# Add your API key to .env
+
+# Start everything
+docker-compose up --build
+
+# API docs
+open http://localhost:8000/docs
+
+# MongoDB UI  
+open http://localhost:8081
+```
+
 ## Author
 Gurudarshan - Senior Software Engineer
 13 years experience | Investment Banking Domain | Morgan Stanley
